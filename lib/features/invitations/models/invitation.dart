@@ -8,6 +8,8 @@ class Invitation {
   status; // 'draft' (Bản nháp), 'active' (Đang chạy), 'expired' (Hết hạn)
   final DateTime eventDate; // Ngày cưới
   final List<SectionData> sections;
+  final String? manageToken; // Thêm trường Token
+  final String? managePin; // Thêm trường PIN
 
   Invitation({
     required this.id,
@@ -18,6 +20,8 @@ class Invitation {
     required this.status,
     required this.eventDate,
     required this.sections,
+    this.manageToken,
+    this.managePin,
   });
 
   // ---> THÊM HÀM NÀY ĐỂ ĐỌC DATA TỪ SUPABASE <---
@@ -36,6 +40,8 @@ class Invitation {
               ?.map((e) => SectionData.fromJson(e as Map<String, dynamic>))
               .toList() ??
           [],
+      manageToken: json['manage_token'],
+      managePin: json['manage_pin'],
     );
   }
 }

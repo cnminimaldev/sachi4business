@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:wedding_admin_panel/features/invitations/views/widgets/our_story_form.dart';
+import 'package:wedding_admin_panel/features/invitations/views/widgets/timeline_form.dart';
 import '../../../core/theme/app_theme.dart';
 import '../models/invitation.dart';
 import 'dart:typed_data';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import '../../../core/network/upload_service.dart';
+import 'widgets/qr_code_form.dart';
 
 // ==========================================
 // MOCK DATA: CÁC MẪU THIỆP ĐỊNH NGHĨA SẴN
@@ -55,32 +58,48 @@ class _InvitationEditorScreenState extends State<InvitationEditorScreen> {
   final TextEditingController _groomController = TextEditingController();
   DateTime? _selectedDate;
 
+  List<InvitationTemplate> _dbTemplates = [];
+  bool _isLoadingTemplates = true;
+
+  Future<void> _fetchTemplates() async {
+    try {
+      final data = await Supabase.instance.client.from('templates').select();
+      setState(() {
+        _dbTemplates = data
+            .map(
+              (json) => InvitationTemplate(
+                json['id'],
+                json['name'],
+                List<String>.from(json['required_sections']),
+              ),
+            )
+            .toList();
+        _isLoadingTemplates = false;
+
+        // Gán template mặc định nếu tạo mới
+        if (widget.existingInvitation == null && _dbTemplates.isNotEmpty) {
+          _selectedTemplate = _dbTemplates.first;
+          _generateSmartForm();
+        }
+      });
+    } catch (e) {
+      print('Lỗi tải template: $e');
+    }
+  }
+
   @override
   void initState() {
     super.initState();
 
-    // NẾU LÀ CHẾ ĐỘ SỬA (CÓ DỮ LIỆU CŨ)
     if (widget.existingInvitation != null) {
       _brideController.text = widget.existingInvitation!.brideName;
       _groomController.text = widget.existingInvitation!.groomName;
       _selectedDate = widget.existingInvitation!.eventDate;
-
-      // BÊ NGUYÊN DANH SÁCH SECTION CŨ VÀO FORM
       _formSections = widget.existingInvitation!.sections;
+    }
 
-      // (Tùy chọn) Chọn lại đúng template mẫu.
-      // Do chúng ta đang dùng mặc định, bạn có thể tạm thời lấy mẫu đầu tiên
-      _selectedTemplate = mockTemplates.firstWhere(
-        (template) => template.id == widget.existingInvitation!.templateId,
-        orElse: () => mockTemplates
-            .first, // Nếu không tìm thấy (lỗi logic) thì dự phòng lấy mẫu đầu tiên
-      );
-    }
-    // NẾU LÀ TẠO MỚI (Tự sinh form mặc định)
-    else {
-      _selectedTemplate = mockTemplates.first;
-      _generateSmartForm();
-    }
+    // Bắt đầu gọi API lấy template
+    _fetchTemplates();
   }
 
   @override
@@ -260,30 +279,34 @@ class _InvitationEditorScreenState extends State<InvitationEditorScreen> {
                   ),
                   const SizedBox(height: 16),
 
-                  // DROPDOWN CHỌN MẪU THIỆP
-                  DropdownButtonFormField<InvitationTemplate>(
-                    value: _selectedTemplate,
-                    decoration: const InputDecoration(
-                      prefixIcon: Icon(
-                        Icons.style_outlined,
-                        color: AppTheme.primaryPink,
-                      ),
-                    ),
-                    items: mockTemplates
-                        .map(
-                          (tpl) => DropdownMenuItem(
-                            value: tpl,
-                            child: Text(tpl.name),
+                  _isLoadingTemplates
+                      ? const Center(
+                          child: CircularProgressIndicator(),
+                        ) // Hiển thị xoay xoay khi đang tải
+                      : DropdownButtonFormField<InvitationTemplate>(
+                          value: _selectedTemplate,
+                          decoration: const InputDecoration(
+                            prefixIcon: Icon(
+                              Icons.style_outlined,
+                              color: AppTheme.primaryPink,
+                            ),
                           ),
-                        )
-                        .toList(),
-                    onChanged: (newTemplate) {
-                      setState(() {
-                        _selectedTemplate = newTemplate;
-                        _generateSmartForm(); // Cập nhật lại form nội dung ngay lập tức
-                      });
-                    },
-                  ),
+                          // SỬA Ở ĐÂY: Dùng _dbTemplates thay vì mockTemplates
+                          items: _dbTemplates
+                              .map(
+                                (tpl) => DropdownMenuItem(
+                                  value: tpl,
+                                  child: Text(tpl.name),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (newTemplate) {
+                            setState(() {
+                              _selectedTemplate = newTemplate;
+                              _generateSmartForm();
+                            });
+                          },
+                        ),
 
                   const Padding(
                     padding: EdgeInsets.symmetric(vertical: 24.0),
@@ -442,6 +465,8 @@ class _InvitationEditorScreenState extends State<InvitationEditorScreen> {
                 section: section,
                 onUpdate: () => setState(() {}), // Hàm callback cập nhật UI cha
               )
+            else if (section.type == 'qr_code')
+              QRCodeForm(section: section, onUpdate: () => setState(() {}))
             else if (section.type == 'gallery')
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -578,213 +603,5 @@ class _InvitationEditorScreenState extends State<InvitationEditorScreen> {
       default:
         return Icons.widgets_outlined;
     }
-  }
-}
-
-class OurStoryForm extends StatefulWidget {
-  final SectionData section;
-  final VoidCallback onUpdate;
-
-  const OurStoryForm({
-    super.key,
-    required this.section,
-    required this.onUpdate,
-  });
-
-  @override
-  State<OurStoryForm> createState() => _OurStoryFormState();
-}
-
-class _OurStoryFormState extends State<OurStoryForm> {
-  late TextEditingController _storyController;
-
-  @override
-  void initState() {
-    super.initState();
-    // Đọc dữ liệu cũ từ JSON content ra nếu có
-    _storyController = TextEditingController(
-      text: widget.section.content['text'] ?? '',
-    );
-  }
-
-  @override
-  void dispose() {
-    _storyController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return TextField(
-      controller: _storyController,
-      maxLines: 5,
-      decoration: const InputDecoration(
-        hintText:
-            'Nhập câu chuyện tình yêu của hai người, hành trình từ lúc gặp nhau đến khi chung đôi...',
-        alignLabelWithHint: true,
-      ),
-      onChanged: (value) {
-        // Cập nhật trực tiếp vào Map content của section
-        widget.section.content['text'] = value.trim();
-        widget.onUpdate(); // Báo cho màn hình chính biết dữ liệu thay đổi
-      },
-    );
-  }
-}
-
-class TimelineForm extends StatefulWidget {
-  final SectionData section;
-  final VoidCallback onUpdate;
-
-  const TimelineForm({
-    super.key,
-    required this.section,
-    required this.onUpdate,
-  });
-
-  @override
-  State<TimelineForm> createState() => _TimelineFormState();
-}
-
-class _TimelineFormState extends State<TimelineForm> {
-  List<dynamic> _items = [];
-
-  @override
-  void initState() {
-    super.initState();
-    // Khởi tạo danh sách mốc thời gian từ content JSON
-    _items = widget.section.content['items'] ?? [];
-    widget.section.content['items'] = _items; // Đảm bảo map không bị null
-  }
-
-  void _addItem() {
-    setState(() {
-      _items.add({'time': '', 'title': '', 'desc': ''});
-    });
-    widget.onUpdate();
-  }
-
-  void _removeItem(int index) {
-    setState(() {
-      _items.removeAt(index);
-    });
-    widget.onUpdate();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (_items.isEmpty)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 16.0),
-            child: Text(
-              'Chưa có mốc thời gian nào. Hãy thêm mốc đầu tiên!',
-              style: TextStyle(
-                color: AppTheme.textLight,
-                fontStyle: FontStyle.italic,
-              ),
-            ),
-          ),
-
-        // Danh sách các mốc thời gian đang có
-        ListView.separated(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: _items.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 16),
-          itemBuilder: (context, index) {
-            final item = _items[index] as Map<String, dynamic>;
-
-            return Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppTheme.backgroundCream.withOpacity(0.5),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: AppTheme.secondaryPink.withOpacity(0.3),
-                ),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // 1. Ô nhập Giờ/Thời gian (Nhỏ bên trái)
-                  SizedBox(
-                    width: 90,
-                    child: TextFormField(
-                      initialValue: item['time'],
-                      decoration: const InputDecoration(
-                        labelText: 'Giờ',
-                        hintText: '18:00',
-                      ),
-                      onChanged: (val) {
-                        item['time'] = val.trim();
-                        widget.onUpdate();
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-
-                  // 2. Ô nhập Tiêu đề & Mô tả (Bên phải)
-                  Expanded(
-                    child: Column(
-                      children: [
-                        TextFormField(
-                          initialValue: item['title'],
-                          decoration: const InputDecoration(
-                            labelText: 'Tên sự kiện',
-                            hintText: 'Đón khách / Khai tiệc',
-                          ),
-                          onChanged: (val) {
-                            item['title'] = val.trim();
-                            widget.onUpdate();
-                          },
-                        ),
-                        const SizedBox(height: 8),
-                        TextFormField(
-                          initialValue: item['desc'],
-                          decoration: const InputDecoration(
-                            labelText: 'Mô tả ngắn (Không bắt buộc)',
-                            hintText: 'Chụp ảnh lưu niệm tại Photobooth',
-                          ),
-                          onChanged: (val) {
-                            item['desc'] = val.trim();
-                            widget.onUpdate();
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  // 3. Nút xóa mốc thời gian này
-                  IconButton(
-                    icon: const Icon(
-                      Icons.delete_outline,
-                      color: Colors.redAccent,
-                    ),
-                    onPressed: () => _removeItem(index),
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
-
-        const SizedBox(height: 16),
-
-        // Nút thêm mốc mới
-        ElevatedButton.icon(
-          onPressed: _addItem,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppTheme.secondaryPink.withOpacity(0.2),
-            foregroundColor: AppTheme.deepPink,
-            elevation: 0,
-          ),
-          icon: const Icon(Icons.add, size: 18),
-          label: const Text('Thêm mốc thời gian'),
-        ),
-      ],
-    );
   }
 }

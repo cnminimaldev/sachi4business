@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:wedding_admin_panel/features/invitations/models/invitation.dart';
 import 'package:wedding_admin_panel/features/invitations/views/guest_invitation_screen.dart';
+import 'package:wedding_admin_panel/features/invitations/views/guest_management_screen.dart';
 import 'package:wedding_admin_panel/features/invitations/views/invitation_editor_screen.dart';
 import 'package:wedding_admin_panel/features/invitations/views/invitation_preview_screen.dart';
 
@@ -11,6 +12,7 @@ import '../../features/auth/views/login_screen.dart';
 import '../../features/dashboard/views/dashboard_screen.dart';
 import '../../features/invitations/views/invitation_list_screen.dart';
 import '../../shared/layouts/main_layout.dart';
+import '../../features/invitations/views/host_auth_screen.dart';
 
 // Khóa Global để Router quản lý ngữ cảnh
 final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>(
@@ -49,10 +51,43 @@ final GoRouter appRouter = GoRouter(
   routes: [
     GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
     GoRoute(
+      path: '/g/:code',
+      builder: (context, state) {
+        final guestCode = state.pathParameters['code']!;
+        return GuestInvitationScreen(
+          guestCode: guestCode,
+        ); // Truyền mã khách vào
+      },
+    ),
+    GoRoute(
       path: '/i/:id',
       builder: (context, state) {
         final id = state.pathParameters['id']!;
         return GuestInvitationScreen(invitationId: id);
+      },
+    ),
+    GoRoute(
+      path: '/i/:id', // Đường dẫn ngắn gọn để gửi cho khách
+      builder: (context, state) {
+        // Lấy ID từ tham số đường dẫn URL
+        final invitationId = state.pathParameters['id']!;
+        return GuestInvitationScreen(invitationId: invitationId);
+      },
+    ),
+    GoRoute(
+      path: '/invitations/guests',
+      builder: (context, state) {
+        // Lấy object invitation được truyền sang
+        final invitation = state.extra as Invitation;
+        return GuestManagementScreen(invitation: invitation);
+      },
+    ),
+    // Route dành cho Dâu/Rể nhập mã PIN
+    GoRoute(
+      path: '/host/:token',
+      builder: (context, state) {
+        final token = state.pathParameters['token']!;
+        return HostAuthScreen(token: token);
       },
     ),
     // StatefulShellRoute giúp giữ nguyên trạng thái của từng tab khi chuyển qua lại
