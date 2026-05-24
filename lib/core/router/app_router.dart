@@ -50,30 +50,30 @@ final GoRouter appRouter = GoRouter(
 
   routes: [
     GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
-    GoRoute(
-      path: '/g/:code',
-      builder: (context, state) {
-        final guestCode = state.pathParameters['code']!;
-        return GuestInvitationScreen(
-          guestCode: guestCode,
-        ); // Truyền mã khách vào
-      },
-    ),
-    GoRoute(
-      path: '/i/:id',
-      builder: (context, state) {
-        final id = state.pathParameters['id']!;
-        return GuestInvitationScreen(invitationId: id);
-      },
-    ),
-    GoRoute(
-      path: '/i/:id', // Đường dẫn ngắn gọn để gửi cho khách
-      builder: (context, state) {
-        // Lấy ID từ tham số đường dẫn URL
-        final invitationId = state.pathParameters['id']!;
-        return GuestInvitationScreen(invitationId: invitationId);
-      },
-    ),
+    // GoRoute(
+    //   path: '/g/:code',
+    //   builder: (context, state) {
+    //     final guestCode = state.pathParameters['code']!;
+    //     return GuestInvitationScreen(
+    //       guestCode: guestCode,
+    //     ); // Truyền mã khách vào
+    //   },
+    // ),
+    // GoRoute(
+    //   path: '/i/:id',
+    //   builder: (context, state) {
+    //     final id = state.pathParameters['id']!;
+    //     return GuestInvitationScreen(invitationId: id);
+    //   },
+    // ),
+    // GoRoute(
+    //   path: '/i/:id', // Đường dẫn ngắn gọn để gửi cho khách
+    //   builder: (context, state) {
+    //     // Lấy ID từ tham số đường dẫn URL
+    //     final invitationId = state.pathParameters['id']!;
+    //     return GuestInvitationScreen(invitationId: invitationId);
+    //   },
+    // ),
     GoRoute(
       path: '/invitations/guests',
       builder: (context, state) {
@@ -122,14 +122,14 @@ final GoRouter appRouter = GoRouter(
                     );
                   },
                 ),
-                GoRoute(
-                  path: 'preview',
-                  builder: (context, state) {
-                    // Lấy object Invitation được truyền qua extra
-                    final invitation = state.extra as Invitation;
-                    return InvitationPreviewScreen(invitation: invitation);
-                  },
-                ),
+                // GoRoute(
+                //   path: 'preview',
+                //   builder: (context, state) {
+                //     // Lấy object Invitation được truyền qua extra
+                //     final invitation = state.extra as Invitation;
+                //     return InvitationPreviewScreen(invitation: invitation);
+                //   },
+                // ),
               ],
             ),
           ],

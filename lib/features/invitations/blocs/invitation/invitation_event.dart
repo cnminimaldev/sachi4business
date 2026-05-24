@@ -10,9 +10,13 @@ class DeleteInvitation extends InvitationEvent {
   DeleteInvitation(this.id);
 }
 
-// Bổ sung sự kiện Nhân bản thiệp
 class CloneInvitation extends InvitationEvent {
   final Invitation oldInvitation;
 
   CloneInvitation(this.oldInvitation);
+}
+
+class SaveInvitation extends InvitationEvent {
+  final Invitation invitation;
+  SaveInvitation(this.invitation);
 }

@@ -418,7 +418,7 @@ class _InvitationListViewState extends State<_InvitationListView> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '${invitation.brideName} & ${invitation.groomName}',
+                        invitation.title,
                         style: const TextStyle(
                           fontWeight: FontWeight.bold,
                           fontSize: 18,
@@ -535,7 +535,7 @@ class _InvitationListViewState extends State<_InvitationListView> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${invitation.brideName} & ${invitation.groomName}',
+                  invitation.title,
                   style: const TextStyle(
                     color: AppTheme.textMain,
                     fontSize: 16,

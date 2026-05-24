@@ -1,46 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:wedding_admin_panel/features/invitations/views/widgets/our_story_form.dart';
-import 'package:wedding_admin_panel/features/invitations/views/widgets/timeline_form.dart';
-import '../../../core/theme/app_theme.dart';
 import '../models/invitation.dart';
+import '../models/template_config.dart';
+import 'package:flutter/material.dart';
 import 'dart:typed_data';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+
+import '../models/invitation.dart';
+import '../models/template_config.dart';
 import '../../../core/network/upload_service.dart';
-import 'widgets/qr_code_form.dart';
 
-// ==========================================
-// MOCK DATA: CÁC MẪU THIỆP ĐỊNH NGHĨA SẴN
-// (Sau này dữ liệu này sẽ được kéo từ Supabase về)
-// ==========================================
-class InvitationTemplate {
-  final String id;
-  final String name;
-  final List<String> requiredSections; // Quy định các section có trong mẫu này
+import 'package:flutter_bloc/flutter_bloc.dart';
+import '../blocs/invitation/invitation_bloc.dart';
+import '../blocs/invitation/invitation_event.dart';
+import '../blocs/invitation/invitation_state.dart';
 
-  InvitationTemplate(this.id, this.name, this.requiredSections);
-}
-
-final List<InvitationTemplate> mockTemplates = [
-  InvitationTemplate('tpl_1', 'Mẫu Minimalist (Chỉ Tên & Album Ảnh)', [
-    'gallery',
-  ]),
-  InvitationTemplate('tpl_2', 'Mẫu Cổ điển (Chuyện Tình & Lịch trình)', [
-    'our_story',
-    'timeline',
-  ]),
-  InvitationTemplate('tpl_3', 'Mẫu Premium (Đầy đủ Tính năng)', [
-    'our_story',
-    'timeline',
-    'gallery',
-  ]),
-];
-
-// ==========================================
-// MÀN HÌNH CHỈNH SỬA CHÍNH
-// ==========================================
 class InvitationEditorScreen extends StatefulWidget {
   final Invitation? existingInvitation;
 
@@ -51,557 +26,1379 @@ class InvitationEditorScreen extends StatefulWidget {
 }
 
 class _InvitationEditorScreenState extends State<InvitationEditorScreen> {
-  InvitationTemplate? _selectedTemplate;
-  List<SectionData> _formSections = [];
+  late Invitation _invitation;
+  late TemplateConfig _selectedConfig;
 
-  final TextEditingController _brideController = TextEditingController();
-  final TextEditingController _groomController = TextEditingController();
-  DateTime? _selectedDate;
-
-  List<InvitationTemplate> _dbTemplates = [];
-  bool _isLoadingTemplates = true;
-
-  Future<void> _fetchTemplates() async {
-    try {
-      final data = await Supabase.instance.client.from('templates').select();
-      setState(() {
-        _dbTemplates = data
-            .map(
-              (json) => InvitationTemplate(
-                json['id'],
-                json['name'],
-                List<String>.from(json['required_sections']),
-              ),
-            )
-            .toList();
-        _isLoadingTemplates = false;
-
-        // Gán template mặc định nếu tạo mới
-        if (widget.existingInvitation == null && _dbTemplates.isNotEmpty) {
-          _selectedTemplate = _dbTemplates.first;
-          _generateSmartForm();
-        }
-      });
-    } catch (e) {
-      print('Lỗi tải template: $e');
-    }
-  }
+  late final TextEditingController _titleController;
+  late final TextEditingController _brideController;
+  late final TextEditingController _groomController;
 
   @override
   void initState() {
     super.initState();
+    // 1. Khởi tạo dữ liệu: Dùng data cũ nếu đang sửa, hoặc tạo mới hoàn toàn
+    _invitation =
+        widget.existingInvitation ??
+        Invitation(
+          id: '',
+          title: 'Thiệp cưới mới',
+          templateId: availableTemplates.first.id,
+          brideName: '',
+          groomName: '',
+          status: 'draft',
+          eventDate: DateTime.now().add(const Duration(days: 30)),
+          uploadedImages: [],
+          dynamicData: {},
+        );
 
-    if (widget.existingInvitation != null) {
-      _brideController.text = widget.existingInvitation!.brideName;
-      _groomController.text = widget.existingInvitation!.groomName;
-      _selectedDate = widget.existingInvitation!.eventDate;
-      _formSections = widget.existingInvitation!.sections;
-    }
+    // 2. Tìm cấu hình Template dựa trên templateId
+    _selectedConfig = availableTemplates.firstWhere(
+      (t) => t.id == _invitation.templateId,
+      orElse: () => availableTemplates.first,
+    );
 
-    // Bắt đầu gọi API lấy template
-    _fetchTemplates();
+    _titleController = TextEditingController(text: _invitation.title);
+    _brideController = TextEditingController(text: _invitation.brideName);
+    _groomController = TextEditingController(text: _invitation.groomName);
   }
 
   @override
   void dispose() {
-    // Nhớ hủy controller khi thoát màn hình để giải phóng RAM
+    // THÊM: Hủy controller để tránh rò rỉ bộ nhớ
+    _titleController.dispose();
     _brideController.dispose();
     _groomController.dispose();
     super.dispose();
   }
 
-  // ---> HÀM LƯU DỮ LIỆU LÊN SUPABASE <---
-  Future<void> _saveInvitation() async {
-    // 1. Kiểm tra Validate cơ bản
-    if (_brideController.text.trim().isEmpty ||
-        _groomController.text.trim().isEmpty ||
-        _selectedDate == null) {
-      SmartDialog.showToast('Vui lòng nhập đủ tên Dâu Rể và Ngày cưới!');
-      return;
-    }
+  // Hàm xử lý khi Dropdown thay đổi
+  void _onTemplateChanged(String? newTemplateId) {
+    if (newTemplateId == null) return;
 
-    SmartDialog.showLoading(msg: 'Đang lưu thiệp lên hệ thống 🌸...');
-
-    try {
-      // 2. Chuyển đổi danh sách SectionData thành mảng JSON để nạp vào cột JSONB
-      final List<Map<String, dynamic>> sectionsJson = _formSections.map((
-        section,
-      ) {
-        return {
-          'id': section.id,
-          'type': section.type,
-          'title': section.title,
-          'isActive': section.isActive,
-          'content': section
-              .content, // Toàn bộ link ảnh R2 hay text Our Story nằm hết ở đây
-        };
-      }).toList();
-
-      // 3. Chuẩn bị cục dữ liệu (Payload) chuẩn khớp với tên cột trong database
-      final payload = {
-        'template_id': _selectedTemplate?.id ?? mockTemplates.first.id,
-        'bride_name': _brideController.text.trim(),
-        'groom_name': _groomController.text.trim(),
-        'event_date': _selectedDate!
-            .toIso8601String(), // Convert ngày sang chuẩn quốc tế
-        'status': 'draft', // Mặc định lưu nháp
-        'sections': sectionsJson,
-      };
-
-      // 4. Gọi API của Supabase
-      if (widget.existingInvitation == null) {
-        // Chế độ TẠO MỚI
-        await Supabase.instance.client.from('invitations').insert(payload);
-      } else {
-        // Chế độ CẬP NHẬT
-        await Supabase.instance.client
-            .from('invitations')
-            .update(payload)
-            .eq('id', widget.existingInvitation!.id);
-      }
-
-      SmartDialog.dismiss();
-      SmartDialog.showToast('Lưu thiệp thành công! 🎉');
-
-      // 5. Quay trở về màn hình danh sách
-      if (mounted) {
-        context.pop();
-      }
-    } catch (e) {
-      SmartDialog.dismiss();
-      SmartDialog.showToast('Lỗi khi lưu: $e');
-      print('Save Error: $e');
-    }
-  }
-
-  // Hàm "Thông minh": Tự động sinh ra các Form dựa trên Template được chọn
-  void _generateSmartForm() {
-    if (_selectedTemplate == null) return;
-
-    _formSections = _selectedTemplate!.requiredSections.map((type) {
-      return SectionData(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        type: type,
-        title: _getDefaultTitleForType(type),
-        isActive: true,
-        content:
-            {}, // ---> BỔ SUNG DÒNG NÀY: Khởi tạo một Map trống hoàn toàn mới
+    setState(() {
+      _selectedConfig = availableTemplates.firstWhere(
+        (t) => t.id == newTemplateId,
       );
-    }).toList();
+
+      // Cập nhật templateId vào biến _invitation
+      _invitation = Invitation(
+        id: _invitation.id,
+        templateId: newTemplateId,
+        brideName: _invitation.brideName,
+        groomName: _invitation.groomName,
+        status: _invitation.status,
+        eventDate: _invitation.eventDate,
+        uploadedImages: _invitation.uploadedImages,
+        coverImageIndex: _invitation.coverImageIndex,
+        dynamicData: _invitation.dynamicData,
+      );
+    });
   }
 
-  String _getDefaultTitleForType(String type) {
-    switch (type) {
-      case 'our_story':
-        return 'Chuyện tình mình';
-      case 'timeline':
-        return 'Chương trình tiệc cưới';
-      case 'gallery':
-        return 'Album khoảnh khắc';
-      default:
-        return 'Tiêu đề';
-    }
+  // ==========================================
+  // HÀM TIỆN ÍCH: Cập nhật dữ liệu động (dynamicData)
+  // ==========================================
+  void _updateDynamicData(String key, dynamic value) {
+    setState(() {
+      // Bóc tách Map cũ, đè dữ liệu mới vào, và lưu lại vào State
+      final newData = Map<String, dynamic>.from(_invitation.dynamicData);
+      newData[key] = value;
+      _invitation = _invitation.copyWith(dynamicData: newData);
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        backgroundColor: AppTheme.backgroundCream,
-        appBar: AppBar(
-          backgroundColor: AppTheme.surfaceWhite,
-          elevation: 0,
-          leading: const BackButton(color: AppTheme.textMain),
-          title: Text(
-            widget.existingInvitation == null
-                ? 'Tạo Thiệp Mới'
-                : 'Chỉnh sửa Thiệp',
-            style: const TextStyle(
-              color: AppTheme.textMain,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          bottom: const TabBar(
-            labelColor: AppTheme.deepPink,
-            unselectedLabelColor: AppTheme.textLight,
-            indicatorColor: AppTheme.deepPink,
-            tabs: [
-              Tab(icon: Icon(Icons.info_outline), text: 'Thông tin cơ bản'),
-              Tab(icon: Icon(Icons.edit_document), text: 'Nội dung Thiệp'),
-            ],
-          ),
-          actions: [
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: ElevatedButton.icon(
-                onPressed: _saveInvitation,
-                icon: const Icon(Icons.save_outlined, size: 20),
-                label: const Text('Lưu thay đổi'),
-              ),
-            ),
-          ],
-        ),
-        body: TabBarView(
-          children: [
-            _buildBasicInfoTab(),
-            _buildSmartFormTab(), // Thay thế bằng Tab "Thông minh"
-          ],
-        ),
-      ),
-    );
-  }
+    // 1. Bọc BlocProvider ở ngoài cùng để cấp phát InvitationBloc cho màn hình này
+    return BlocProvider(
+      create: (context) => InvitationBloc(),
+      // 2. Dùng Builder để tạo ra một 'context' mới mẻ, đã nhận diện được BLoC bên trên
+      child: Builder(
+        builder: (context) {
+          // 3. Bây giờ BlocListener và context.read đã có thể hoạt động bình thường
+          return BlocListener<InvitationBloc, InvitationState>(
+            listener: (context, state) {
+              if (state is InvitationLoading) {
+                SmartDialog.showLoading(
+                  msg: 'Đang lưu dữ liệu lên hệ thống 🌸...',
+                );
+              } else {
+                SmartDialog.dismiss();
+              }
 
-  // ========================================================
-  // WIDGET: TAB 1 - THÔNG TIN CƠ BẢN (CÓ CHỌN TEMPLATE)
-  // ========================================================
-  Widget _buildBasicInfoTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24.0),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: 800,
-          ), // Rút gọn chiều rộng cho đẹp mắt
-          child: Card(
-            child: Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Chọn Mẫu Giao Diện',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: AppTheme.deepPink,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  _isLoadingTemplates
-                      ? const Center(
-                          child: CircularProgressIndicator(),
-                        ) // Hiển thị xoay xoay khi đang tải
-                      : DropdownButtonFormField<InvitationTemplate>(
-                          value: _selectedTemplate,
-                          decoration: const InputDecoration(
-                            prefixIcon: Icon(
-                              Icons.style_outlined,
-                              color: AppTheme.primaryPink,
-                            ),
-                          ),
-                          // SỬA Ở ĐÂY: Dùng _dbTemplates thay vì mockTemplates
-                          items: _dbTemplates
-                              .map(
-                                (tpl) => DropdownMenuItem(
-                                  value: tpl,
-                                  child: Text(tpl.name),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (newTemplate) {
-                            setState(() {
-                              _selectedTemplate = newTemplate;
-                              _generateSmartForm();
-                            });
-                          },
-                        ),
-
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24.0),
-                    child: Divider(),
-                  ),
-
-                  const Text(
-                    'Thông tin Dâu Rể & Sự kiện',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: AppTheme.deepPink,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      // Gắn Controller Cô Dâu
-                      Expanded(
-                        child: TextField(
-                          controller: _brideController,
-                          decoration: const InputDecoration(
-                            labelText: 'Tên Cô dâu',
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      // Gắn Controller Chú Rể
-                      Expanded(
-                        child: TextField(
-                          controller: _groomController,
-                          decoration: const InputDecoration(
-                            labelText: 'Tên Chú rể',
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Chỗ này chuyển từ TextField thành InkWell để làm nút Chọn Ngày
-                  InkWell(
-                    onTap: () async {
-                      final pickedDate = await showDatePicker(
-                        context: context,
-                        initialDate: _selectedDate ?? DateTime.now(),
-                        firstDate:
-                            DateTime.now(), // Không cho chọn ngày trong quá khứ
-                        lastDate: DateTime(2030),
-                      );
-                      if (pickedDate != null) {
-                        setState(() {
-                          _selectedDate = pickedDate;
-                        });
+              if (state is InvitationOperationSuccess) {
+                SmartDialog.showToast(state.message);
+                // Lưu xong thì tự động đóng màn hình Editor
+                context.pop();
+              } else if (state is InvitationError) {
+                SmartDialog.showToast(state.message);
+              }
+            },
+            child: Scaffold(
+              backgroundColor: const Color(0xFFFDFBF7),
+              appBar: AppBar(
+                title: Text(
+                  widget.existingInvitation == null
+                      ? 'Tạo thiệp mới'
+                      : 'Chỉnh sửa thiệp',
+                ),
+                backgroundColor: Colors.white,
+                foregroundColor: const Color(0xFF2C2C2C),
+                elevation: 0,
+                actions: [
+                  TextButton.icon(
+                    onPressed: () {
+                      // KÍCH HOẠT LƯU THIỆP
+                      if (_brideController.text.trim().isEmpty ||
+                          _groomController.text.trim().isEmpty) {
+                        SmartDialog.showToast(
+                          'Vui lòng nhập đủ tên Cô Dâu và Chú Rể!',
+                        );
+                        return;
                       }
+
+                      final finalInvitation = _invitation.copyWith(
+                        title: _titleController.text.trim(),
+                        brideName: _brideController.text.trim(),
+                        groomName: _groomController.text.trim(),
+                      );
+
+                      context.read<InvitationBloc>().add(
+                        SaveInvitation(finalInvitation),
+                      );
                     },
-                    child: InputDecorator(
-                      decoration: const InputDecoration(
-                        labelText: 'Ngày diễn ra sự kiện',
-                        suffixIcon: Icon(
-                          Icons.calendar_today,
-                          color: AppTheme.primaryPink,
-                        ),
-                      ),
-                      // Hiển thị ngày đã chọn hoặc text mặc định
-                      child: Text(
-                        _selectedDate == null
-                            ? 'Chưa chọn ngày'
-                            : '${_selectedDate!.day}/${_selectedDate!.month}/${_selectedDate!.year}',
-                      ),
+                    icon: const Icon(
+                      Icons.save_outlined,
+                      color: Color(0xFFE26D6D),
+                    ),
+                    label: const Text(
+                      'Lưu thay đổi',
+                      style: TextStyle(color: Color(0xFFE26D6D)),
                     ),
                   ),
                 ],
               ),
+              body: SingleChildScrollView(
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildTemplateSelector(),
+                    const SizedBox(height: 32),
+                    const Divider(color: Colors.black12),
+                    const SizedBox(height: 24),
+                    _buildBasicInfoForm(),
+                    const SizedBox(height: 32),
+                    _buildMediaPool(),
+                    const SizedBox(height: 32),
+                    _buildDynamicForms(),
+                    const SizedBox(height: 40),
+                  ],
+                ),
+              ),
             ),
+          );
+        },
+      ),
+    );
+  }
+
+  // ==========================================
+  // WIDGET: THÔNG TIN CƠ BẢN
+  // ==========================================
+  Widget _buildBasicInfoForm() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '2. Thông tin cơ bản',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF2C2C2C),
           ),
         ),
-      ),
-    );
-  }
-
-  // ========================================================
-  // WIDGET: TAB 2 - FORM TỰ ĐỘNG (DỰA THEO TEMPLATE)
-  // ========================================================
-  Widget _buildSmartFormTab() {
-    if (_formSections.isEmpty) {
-      return const Center(
-        child: Text('Mẫu này không yêu cầu thêm nội dung chi tiết.'),
-      );
-    }
-
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 800),
-        child: ListView.separated(
-          padding: const EdgeInsets.all(24),
-          itemCount: _formSections.length,
-          separatorBuilder: (context, index) => const SizedBox(height: 24),
-          itemBuilder: (context, index) {
-            return _buildDynamicFormForSection(_formSections[index]);
-          },
+        const SizedBox(height: 16),
+        _buildTextField(
+          controller: _titleController,
+          label: 'Tiêu đề quản lý (VD: Thiệp chính thức - Nhà Gái)',
+          icon: Icons.label_outline,
+          onChanged: (val) => _invitation = _invitation.copyWith(title: val),
         ),
-      ),
-    );
-  }
-
-  Widget _buildDynamicFormForSection(SectionData section) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: AppTheme.secondaryPink.withOpacity(0.5),
-          width: 1,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        const SizedBox(height: 16),
+        Row(
           children: [
-            Row(
+            Expanded(
+              child: _buildTextField(
+                controller: _brideController,
+                label: 'Tên Cô Dâu',
+                icon: Icons.female,
+                onChanged: (val) =>
+                    _invitation = _invitation.copyWith(brideName: val),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: _buildTextField(
+                controller: _groomController,
+                label: 'Tên Chú Rể',
+                icon: Icons.male,
+                onChanged: (val) =>
+                    _invitation = _invitation.copyWith(groomName: val),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // Nút chọn ngày giờ
+        InkWell(
+          onTap: () async {
+            final pickedDate = await showDatePicker(
+              context: context,
+              initialDate: _invitation.eventDate,
+              firstDate: DateTime.now(),
+              lastDate: DateTime(2030),
+              builder: (context, child) {
+                return Theme(
+                  data: Theme.of(context).copyWith(
+                    colorScheme: const ColorScheme.light(
+                      primary: Color(0xFFE26D6D),
+                    ),
+                  ),
+                  child: child!,
+                );
+              },
+            );
+            if (pickedDate != null) {
+              setState(() {
+                _invitation = _invitation.copyWith(eventDate: pickedDate);
+              });
+            }
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.grey.withOpacity(0.2)),
+            ),
+            child: Row(
               children: [
-                Icon(_getIconForType(section.type), color: AppTheme.deepPink),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: TextEditingController(text: section.title),
-                    decoration: const InputDecoration(
-                      labelText: 'Tiêu đề hiển thị',
-                      border: InputBorder.none,
-                      filled: false,
-                    ),
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: AppTheme.deepPink,
-                    ),
-                    onChanged: (val) => section.title = val,
+                const Icon(
+                  Icons.calendar_today_rounded,
+                  color: Color(0xFFE26D6D),
+                  size: 20,
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  'Ngày tổ chức: ${_invitation.eventDate.day}/${_invitation.eventDate.month}/${_invitation.eventDate.year}',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    color: Color(0xFF2C2C2C),
                   ),
                 ),
               ],
             ),
-            const Divider(),
-            const SizedBox(height: 16),
+          ),
+        ),
+      ],
+    );
+  }
 
-            // Render UI nhập liệu tương ứng
-            if (section.type == 'our_story')
-              OurStoryForm(
-                section: section,
-                onUpdate: () =>
-                    setState(() {}), // Hàm callback cập nhật UI cha khi gõ
-              )
-            else if (section.type == 'timeline')
-              TimelineForm(
-                section: section,
-                onUpdate: () => setState(() {}), // Hàm callback cập nhật UI cha
-              )
-            else if (section.type == 'qr_code')
-              QRCodeForm(section: section, onUpdate: () => setState(() {}))
-            else if (section.type == 'gallery')
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  ElevatedButton.icon(
-                    onPressed: () async {
-                      final ImagePicker picker = ImagePicker();
-                      final XFile? image = await picker.pickImage(
-                        source: ImageSource.gallery,
-                        maxWidth: 800,
-                        imageQuality: 70,
-                      );
-
-                      if (image != null) {
-                        SmartDialog.showLoading(
-                          msg: 'Đang nén và tải ảnh lên Sachi 🌸...',
-                        );
-
-                        Uint8List fileBytes = await image.readAsBytes();
-                        final publicUrl = await UploadService().uploadImageToR2(
-                          fileBytes,
-                          image.name,
-                        );
-
-                        SmartDialog.dismiss();
-
-                        if (publicUrl != null) {
-                          // ---> CẬP NHẬT TRẠNG THÁI UI Ở ĐÂY <---
-                          setState(() {
-                            // Khởi tạo danh sách ảnh nếu chưa có
-                            section.content['images'] ??= <String>[];
-                            // Thêm link ảnh mới vào danh sách
-                            (section.content['images'] as List).add(publicUrl);
-                          });
-                          SmartDialog.showToast('Tải ảnh thành công!');
-                        } else {
-                          SmartDialog.showToast('Có lỗi xảy ra khi tải ảnh.');
-                        }
-                      }
-                    },
-                    icon: const Icon(Icons.add_photo_alternate_outlined),
-                    label: const Text('Thêm ảnh vào Album'),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // ---> KHU VỰC HIỂN THỊ ẢNH <---
-                  Builder(
-                    builder: (context) {
-                      final List<dynamic>? images = section.content['images'];
-
-                      // Nếu có ảnh -> Hiển thị dạng Lưới (Grid) thu nhỏ
-                      if (images != null && images.isNotEmpty) {
-                        return Wrap(
-                          spacing: 12, // Khoảng cách ngang
-                          runSpacing: 12, // Khoảng cách dọc
-                          children: images.map((url) {
-                            return Stack(
-                              children: [
-                                // Hiển thị Thumbnail ảnh
-                                Container(
-                                  width: 120,
-                                  height: 120,
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                      color: AppTheme.secondaryPink,
-                                      width: 2,
-                                    ),
-                                    image: DecorationImage(
-                                      image: NetworkImage(url),
-                                      fit: BoxFit.cover, // Cắt ảnh vuông vắn
-                                    ),
-                                  ),
-                                ),
-                                // Nút Xóa ảnh (Dấu X góc trên bên phải)
-                                Positioned(
-                                  top: -4,
-                                  right: -4,
-                                  child: IconButton(
-                                    icon: const Icon(
-                                      Icons.cancel,
-                                      color: AppTheme.deepPink,
-                                    ),
-                                    onPressed: () {
-                                      setState(() {
-                                        images.remove(url);
-                                      });
-                                    },
-                                  ),
-                                ),
-                              ],
-                            );
-                          }).toList(),
-                        );
-                      }
-
-                      // Nếu chưa có ảnh -> Hiển thị hộp xám mặc định
-                      return Container(
-                        height: 120,
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: AppTheme.secondaryPink.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: AppTheme.secondaryPink,
-                            style: BorderStyle.solid,
-                          ),
-                        ),
-                        child: const Center(
-                          child: Text(
-                            'Ảnh bạn tải lên sẽ hiển thị ở đây',
-                            style: TextStyle(color: AppTheme.textLight),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ),
-          ],
+  // Hàm tiện ích vẽ TextField
+  Widget _buildTextField({
+    required TextEditingController controller,
+    required String label,
+    required IconData icon,
+    required Function(String) onChanged,
+  }) {
+    return TextField(
+      controller: controller,
+      onChanged: onChanged,
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: Icon(icon, color: const Color(0xFFE26D6D)),
+        filled: true,
+        fillColor: Colors.white,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: Colors.grey.withOpacity(0.2)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: Colors.grey.withOpacity(0.2)),
         ),
       ),
     );
   }
 
-  IconData _getIconForType(String type) {
-    switch (type) {
-      case 'our_story':
-        return Icons.favorite_outline;
-      case 'timeline':
-        return Icons.timeline;
-      case 'gallery':
-        return Icons.photo_library_outlined;
-      default:
-        return Icons.widgets_outlined;
+  // ==========================================
+  // WIDGET: HỒ CHỨA ẢNH (MEDIA POOL)
+  // ==========================================
+  Widget _buildMediaPool() {
+    final images = _invitation.uploadedImages;
+    final bool canUploadMore = images.length < 10;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              '3. Thư viện Ảnh (Media Pool)',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF2C2C2C),
+              ),
+            ),
+            Text(
+              '${images.length}/10 ảnh',
+              style: TextStyle(
+                fontSize: 13,
+                color: canUploadMore ? Colors.grey[600] : Colors.red,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Tải lên các ảnh bạn muốn sử dụng (Ảnh bìa, Album...).',
+          style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+        ),
+        const SizedBox(height: 16),
+
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            // Hiển thị danh sách ảnh đã tải lên
+            ...images.asMap().entries.map((entry) {
+              int index = entry.key;
+              String url = entry.value;
+              return _buildImageThumbnail(url, index);
+            }),
+
+            // Nút Thêm ảnh (chỉ hiện khi chưa đủ 10 ảnh)
+            if (canUploadMore)
+              InkWell(
+                onTap: _uploadMultipleImages,
+                child: Container(
+                  width: 100,
+                  height: 100,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: const Color(0xFFE26D6D).withOpacity(0.5),
+                      style: BorderStyle.solid,
+                    ),
+                  ),
+                  child: const Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.add_photo_alternate_outlined,
+                        color: Color(0xFFE26D6D),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        'Thêm ảnh',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFFE26D6D),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ==========================================
+  // WIDGET: THUMBNAIL ẢNH TRONG POOL VỚI EVENT CHỌN ẢNH BÌA
+  // ==========================================
+  Widget _buildImageThumbnail(String url, int index) {
+    bool isCover = _invitation.coverImageIndex == index;
+
+    return Stack(
+      clipBehavior: Clip
+          .none, // Cho phép nút xóa nhô ra ngoài rìa một chút cho thoáng đãng
+      children: [
+        // Khung bấm chọn ảnh bìa
+        InkWell(
+          onTap: () {
+            setState(() {
+              // Cập nhật chỉ số ảnh bìa mới vào Model
+              _invitation = _invitation.copyWith(coverImageIndex: index);
+            });
+            SmartDialog.showToast('🌸 Đã đặt làm ảnh bìa thiệp cưới!');
+          },
+          borderRadius: BorderRadius.circular(12),
+          child: AnimatedContainer(
+            duration: const Duration(
+              milliseconds: 200,
+            ), // Hiệu ứng chuyển đổi viền mượt mà
+            width: 100,
+            height: 100,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              // Nếu là ảnh bìa thì bo viền màu thương hiệu Sachi đậm hơn, ngược lại bo viền xám nhẹ
+              border: Border.all(
+                color: isCover
+                    ? const Color(0xFFE26D6D)
+                    : Colors.grey.withOpacity(0.2),
+                width: isCover ? 2.5 : 1,
+              ),
+              image: DecorationImage(
+                image: NetworkImage(url),
+                fit: BoxFit.cover,
+              ),
+            ),
+          ),
+        ),
+
+        // Nhãn "ẢNH BÌA" thanh lịch nằm dưới đáy ảnh
+        if (isCover)
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              // Tránh cản trở sự kiện tap của InkWell bên dưới
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE26D6D).withOpacity(0.9),
+                  borderRadius: const BorderRadius.only(
+                    bottomLeft: Radius.circular(10),
+                    bottomRight: Radius.circular(10),
+                  ),
+                ),
+                child: const Text(
+                  'ẢNH BÌA',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1,
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+        // Nút Xóa ảnh (Tách biệt hoàn toàn khỏi sự kiện click chọn ảnh bìa)
+        Positioned(
+          top: -6,
+          right: -6,
+          child: IconButton(
+            icon: const Icon(Icons.cancel, color: Colors.black54, size: 20),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            onPressed: () {
+              final imageUrlToDelete = _invitation.uploadedImages[index];
+
+              setState(() {
+                final newImages = List<String>.from(_invitation.uploadedImages)
+                  ..removeAt(index);
+                int? newCoverIndex = _invitation.coverImageIndex;
+
+                // --- XỬ LÝ LOGIC CHỈ SỐ THÔNG MINH KHI XÓA ---
+                if (newCoverIndex == index) {
+                  // Nếu xóa đúng bức ảnh đang làm ảnh bìa -> Tự động lấy ảnh đầu tiên làm bìa mới, hoặc null nếu hết ảnh
+                  newCoverIndex = newImages.isNotEmpty ? 0 : null;
+                } else if (newCoverIndex != null && newCoverIndex > index) {
+                  // Nếu ảnh bị xóa nằm trước ảnh bìa -> Giảm chỉ số đi 1 để duy trì đúng mục tiêu ảnh bìa
+                  newCoverIndex--;
+                }
+
+                _invitation = _invitation.copyWith(
+                  uploadedImages: newImages,
+                  coverImageIndex: newCoverIndex,
+                );
+              });
+
+              // Tiến hành xóa file tĩnh mồ côi trên Cloudflare R2
+              UploadService().deleteFromR2(imageUrlToDelete);
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Hàm xử lý Upload ảnh lên R2
+  Future<void> _uploadImage() async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 1200,
+      imageQuality: 75,
+    );
+
+    if (image != null) {
+      SmartDialog.showLoading(msg: 'Đang tải ảnh lên Sachi...');
+      try {
+        Uint8List fileBytes = await image.readAsBytes();
+        final publicUrl = await UploadService().uploadImageToR2(
+          fileBytes,
+          image.name,
+        );
+
+        if (publicUrl != null) {
+          setState(() {
+            final newImages = List<String>.from(_invitation.uploadedImages)
+              ..add(publicUrl);
+            _invitation = _invitation.copyWith(
+              uploadedImages: newImages,
+              coverImageIndex:
+                  _invitation.coverImageIndex ??
+                  0, // Mặc định ảnh đầu tiên là ảnh bìa
+            );
+          });
+          SmartDialog.showToast('Tải ảnh thành công!');
+        } else {
+          SmartDialog.showToast('Lỗi tải ảnh lên Cloud.');
+        }
+      } catch (e) {
+        SmartDialog.showToast('Có lỗi xảy ra: $e');
+      } finally {
+        SmartDialog.dismiss();
+      }
     }
+  }
+
+  Future<void> _uploadMultipleImages() async {
+    final ImagePicker picker = ImagePicker();
+    // 1. Cho phép người dùng chọn nhiều ảnh
+    final List<XFile> selectedImages = await picker.pickMultiImage(
+      maxWidth: 1200,
+      imageQuality: 75,
+    );
+
+    if (selectedImages.isNotEmpty) {
+      // 2. Kiểm tra giới hạn 10 ảnh
+      int currentCount = _invitation.uploadedImages.length;
+      if (currentCount + selectedImages.length > 10) {
+        SmartDialog.showToast(
+          'Chỉ được chọn thêm tối đa ${10 - currentCount} ảnh nữa.',
+        );
+        return;
+      }
+
+      SmartDialog.showLoading(
+        msg: 'Đang tải lên ${selectedImages.length} ảnh...',
+      );
+      try {
+        // 3. Chạy vòng lặp Upload song song (Concurrent)
+        final uploadTasks = selectedImages.map((img) async {
+          final bytes = await img.readAsBytes();
+          // Thêm timestamp vào tên file để tránh trùng lặp
+          final fileName =
+              '${DateTime.now().millisecondsSinceEpoch}_${img.name}';
+          return await UploadService().uploadImageToR2(bytes, fileName);
+        }).toList();
+
+        // Chờ tất cả các ảnh upload xong
+        final uploadedUrls = await Future.wait(uploadTasks);
+
+        // 4. Lọc ra các URL không bị lỗi (khác null)
+        final validUrls = uploadedUrls.whereType<String>().toList();
+
+        if (validUrls.isNotEmpty) {
+          setState(() {
+            final newImages = List<String>.from(_invitation.uploadedImages)
+              ..addAll(validUrls);
+            _invitation = _invitation.copyWith(
+              uploadedImages: newImages,
+              coverImageIndex:
+                  _invitation.coverImageIndex ??
+                  0, // Ảnh đầu tiên tự làm ảnh bìa
+            );
+          });
+          SmartDialog.showToast('Tải thành công ${validUrls.length} ảnh! 🎉');
+        }
+      } catch (e) {
+        SmartDialog.showToast('Có lỗi xảy ra: $e');
+      } finally {
+        SmartDialog.dismiss();
+      }
+    }
+  }
+
+  Widget _buildTemplateSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '1. Chọn mẫu giao diện (Template)',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF2C2C2C),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.grey.withOpacity(0.2)),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              value: _selectedConfig.id,
+              isExpanded: true,
+              icon: const Icon(
+                Icons.keyboard_arrow_down_rounded,
+                color: Color(0xFFE26D6D),
+              ),
+              items: availableTemplates.map((template) {
+                return DropdownMenuItem(
+                  value: template.id,
+                  child: Text(
+                    template.name,
+                    style: const TextStyle(fontSize: 15),
+                  ),
+                );
+              }).toList(),
+              onChanged: _onTemplateChanged,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Form nhập liệu bên dưới sẽ tự động thay đổi theo mẫu bạn chọn.',
+          style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+        ),
+      ],
+    );
+  }
+
+  // ==========================================
+  // WIDGET: SMART FORM (TỰ ĐỘNG THAY ĐỔI)
+  // ==========================================
+  Widget _buildDynamicForms() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '4. Nội dung chi tiết (Dựa theo Mẫu thiệp)',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF2C2C2C),
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // 4.1 Form Thông tin Bố Mẹ (Nếu Template yêu cầu)
+        if (_selectedConfig.hasParentsInfo) ...[
+          _buildParentsInfoForm(),
+          const SizedBox(height: 24),
+        ],
+
+        // 4.2 Form Câu chuyện tình yêu (Nếu số lượng yêu cầu > 0)
+        if (_selectedConfig.requiredOurStoryCount > 0) ...[
+          _buildOurStoryForm(),
+          const SizedBox(height: 24),
+        ],
+
+        // 4.3 Form Dòng thời gian / Chương trình tiệc (Nếu Template yêu cầu)
+        if (_selectedConfig.hasTimeline) ...[
+          _buildTimelineForm(),
+          const SizedBox(height: 24),
+        ],
+
+        // 4.4 Form QR Code Nhận quà (Nếu Template yêu cầu)
+        if (_selectedConfig.hasQrCode) ...[
+          _buildQrCodeForm(),
+          const SizedBox(height: 24),
+        ],
+      ],
+    );
+  }
+
+  // ==========================================
+  // WIDGET: FORM OUR STORY (CHUYỆN TÌNH MÌNH)
+  // ==========================================
+  Widget _buildOurStoryForm() {
+    final int requiredCount = _selectedConfig.requiredOurStoryCount;
+    // Lấy danh sách truyện hiện tại, nếu chưa có thì khởi tạo mảng rỗng
+    List<dynamic> stories = List.from(
+      _invitation.dynamicData['our_stories'] ?? [],
+    );
+
+    // --- LOGIC THÔNG MINH: Tự động co giãn số lượng Form ---
+    if (stories.length != requiredCount) {
+      if (stories.length < requiredCount) {
+        // Thiếu thì tự động sinh thêm form trống
+        while (stories.length < requiredCount) {
+          stories.add({
+            'title': '',
+            'date': '',
+            'description': '',
+            'image_url': '',
+          });
+        }
+      } else {
+        // Thừa (do vừa đổi sang template cần ít truyện hơn) thì cắt bớt
+        stories = stories.sublist(0, requiredCount);
+      }
+      // Lưu thẳng vào bộ nhớ tạm thời mà không gọi setState để tránh lỗi build
+      _invitation.dynamicData['our_stories'] = stories;
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.withOpacity(0.15)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.favorite_outline,
+                color: Color(0xFFE26D6D),
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Chuyện tình mình (Yêu cầu $requiredCount cột mốc)',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 15,
+                  color: Color(0xFF2C2C2C),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Lặp qua danh sách để vẽ từng Form câu chuyện
+          ...stories.asMap().entries.map((entry) {
+            int index = entry.key;
+            Map<String, dynamic> story = Map<String, dynamic>.from(entry.value);
+
+            // LOGIC DỌN RÁC: Nếu ảnh đã bị xóa khỏi Media Pool thì gỡ luôn khỏi Story
+            if (story['image_url'] != '' &&
+                !_invitation.uploadedImages.contains(story['image_url'])) {
+              story['image_url'] = '';
+              stories[index] = story;
+              _invitation.dynamicData['our_stories'] = stories;
+            }
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 24.0),
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFDFBF7), // Nền kem nhạt tách biệt
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey.withOpacity(0.15)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'CỘT MỐC ${index + 1}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12,
+                        letterSpacing: 1,
+                        color: Color(0xFFE26D6D),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            initialValue: story['title'] ?? '',
+                            decoration: InputDecoration(
+                              labelText: 'Tiêu đề',
+                              hintText: 'VD: Lần đầu gặp gỡ',
+                              filled: true,
+                              fillColor: Colors.white,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(8),
+                                borderSide: BorderSide.none,
+                              ),
+                            ),
+                            onChanged: (val) {
+                              stories[index]['title'] = val;
+                              _updateDynamicData('our_stories', stories);
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: TextFormField(
+                            initialValue: story['date'] ?? '',
+                            decoration: InputDecoration(
+                              labelText: 'Thời gian',
+                              hintText: 'VD: 14/02/2019',
+                              filled: true,
+                              fillColor: Colors.white,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(8),
+                                borderSide: BorderSide.none,
+                              ),
+                            ),
+                            onChanged: (val) {
+                              stories[index]['date'] = val;
+                              _updateDynamicData('our_stories', stories);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      initialValue: story['description'] ?? '',
+                      maxLines: 3,
+                      decoration: InputDecoration(
+                        labelText: 'Nội dung câu chuyện',
+                        hintText: 'Kể lại kỷ niệm đáng nhớ của hai bạn...',
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                      onChanged: (val) {
+                        stories[index]['description'] = val;
+                        _updateDynamicData('our_stories', stories);
+                      },
+                    ),
+                    const SizedBox(height: 16),
+
+                    // --- KHU VỰC CHỌN ẢNH TỪ MEDIA POOL ---
+                    const Text(
+                      'Chọn 1 ảnh minh họa từ Thư viện (Media Pool):',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+
+                    if (_invitation.uploadedImages.isEmpty)
+                      const Text(
+                        '⚠️ Vui lòng tải ảnh lên ở mục "3. Thư viện Ảnh" trước.',
+                        style: TextStyle(
+                          color: Colors.red,
+                          fontSize: 12,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      )
+                    else
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: _invitation.uploadedImages.map((url) {
+                          bool isSelected = story['image_url'] == url;
+                          return InkWell(
+                            onTap: () {
+                              setState(() {
+                                stories[index]['image_url'] = url;
+                                _updateDynamicData('our_stories', stories);
+                              });
+                            },
+                            borderRadius: BorderRadius.circular(8),
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              width: 60,
+                              height: 60,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: isSelected
+                                      ? const Color(0xFFE26D6D)
+                                      : Colors.transparent,
+                                  width: 3, // Viền hồng đậm khi được chọn
+                                ),
+                                image: DecorationImage(
+                                  image: NetworkImage(url),
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================
+  // WIDGET: FORM NHẬP THÔNG TIN PHỤ HUYNH (ĐÃ TÁCH TRƯỜNG)
+  // ==========================================
+  Widget _buildParentsInfoForm() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.withOpacity(0.15)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.family_restroom_rounded,
+                color: Color(0xFFE26D6D),
+                size: 20,
+              ),
+              SizedBox(width: 8),
+              Text(
+                'Thông tin Gia đình Phụ huynh',
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 15,
+                  color: Color(0xFF2C2C2C),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+
+          // --- KHỐI NHÀ GÁI (CÔ DÂU) ---
+          Text(
+            'Đại diện Nhà Gái (Gia đình Cô Dâu)',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: Colors.grey[600],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: TextFormField(
+                  initialValue: _invitation.dynamicData['bride_father'] ?? '',
+                  decoration: InputDecoration(
+                    labelText: 'Họ tên Thân phụ (Bố)',
+                    hintText: 'VD: Lê Văn A',
+                    filled: true,
+                    fillColor: const Color(0xFFFDFBF7),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  onChanged: (val) => _updateDynamicData('bride_father', val),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: TextFormField(
+                  initialValue: _invitation.dynamicData['bride_mother'] ?? '',
+                  decoration: InputDecoration(
+                    labelText: 'Họ tên Thân mẫu (Mẹ)',
+                    hintText: 'VD: Trần Thị B',
+                    filled: true,
+                    fillColor: const Color(0xFFFDFBF7),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  onChanged: (val) => _updateDynamicData('bride_mother', val),
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 24),
+          Divider(color: Colors.grey.withOpacity(0.1), height: 1),
+          const SizedBox(height: 20),
+
+          // --- KHỐI NHÀ TRAI (CHÚ RỂ) ---
+          Text(
+            'Đại diện Nhà Trai (Gia đình Chú Rể)',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: Colors.grey[600],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: TextFormField(
+                  initialValue: _invitation.dynamicData['groom_father'] ?? '',
+                  decoration: InputDecoration(
+                    labelText: 'Họ tên Thân phụ (Bố)',
+                    hintText: 'VD: Phạm Văn C',
+                    filled: true,
+                    fillColor: const Color(0xFFFDFBF7),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  onChanged: (val) => _updateDynamicData('groom_father', val),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: TextFormField(
+                  initialValue: _invitation.dynamicData['groom_mother'] ?? '',
+                  decoration: InputDecoration(
+                    labelText: 'Họ tên Thân mẫu (Mẹ)',
+                    hintText: 'VD: Nguyễn Thị D',
+                    filled: true,
+                    fillColor: const Color(0xFFFDFBF7),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  onChanged: (val) => _updateDynamicData('groom_mother', val),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Khối Giữ chỗ trực quan (Để Test luồng Smart Form)
+  Widget _buildPlaceholderBlock({
+    required String title,
+    required IconData icon,
+    required String desc,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: color.withOpacity(0.3),
+          style: BorderStyle.solid,
+        ), // Viền đứt nét báo hiệu đang xây dựng
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: color),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 15,
+                    color: color,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  desc,
+                  style: TextStyle(fontSize: 13, color: Colors.black54),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTimelineForm() {
+    // Đọc danh sách timeline từ dynamicData, nếu chưa có thì khởi tạo mảng rỗng
+    final List<dynamic> timeline = _invitation.dynamicData['timeline'] ?? [];
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.withOpacity(0.15)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.timeline, color: Color(0xFF4A90E2), size: 20),
+              SizedBox(width: 8),
+              Text(
+                'Chương trình tiệc (Timeline)',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Danh sách các mốc thời gian có thể Thêm/Xóa động
+          ...timeline.asMap().entries.map((entry) {
+            int index = entry.key;
+            Map<String, dynamic> item = entry.value;
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 12.0),
+              child: Row(
+                children: [
+                  Expanded(
+                    flex: 1, // Ô nhập Giờ nhỏ hơn
+                    child: TextFormField(
+                      initialValue: item['time'],
+                      decoration: InputDecoration(
+                        hintText: 'VD: 09:00',
+                        filled: true,
+                        fillColor: const Color(0xFFFDFBF7),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                      onChanged: (val) {
+                        item['time'] = val;
+                        _updateDynamicData('timeline', timeline);
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 2, // Ô nhập Nội dung sự kiện lớn hơn
+                    child: TextFormField(
+                      initialValue: item['event'],
+                      decoration: InputDecoration(
+                        hintText: 'VD: Đón khách & Chụp ảnh',
+                        filled: true,
+                        fillColor: const Color(0xFFFDFBF7),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                      onChanged: (val) {
+                        item['event'] = val;
+                        _updateDynamicData('timeline', timeline);
+                      },
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.remove_circle_outline,
+                      color: Colors.red,
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        timeline.removeAt(index);
+                        _updateDynamicData('timeline', timeline);
+                      });
+                    },
+                  ),
+                ],
+              ),
+            );
+          }),
+
+          // Nút thêm mốc thời gian mới
+          TextButton.icon(
+            onPressed: () {
+              setState(() {
+                timeline.add({'time': '', 'event': ''});
+                _updateDynamicData('timeline', timeline);
+              });
+            },
+            icon: const Icon(
+              Icons.add_circle_outline,
+              color: Color(0xFF4A90E2),
+            ),
+            label: const Text(
+              'Thêm sự kiện',
+              style: TextStyle(color: Color(0xFF4A90E2)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================
+  // WIDGET: FORM QR CODE & TÀI KHOẢN NGÂN HÀNG
+  // ==========================================
+  Widget _buildQrCodeForm() {
+    final qrCodeUrl = _invitation.dynamicData['qr_code_url'];
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.withOpacity(0.15)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.qr_code_2, color: Color(0xFF7A8266), size: 20),
+              SizedBox(width: 8),
+              Text(
+                'Mã QR Nhận quà',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Khung hiển thị và Nút Upload ảnh QR
+              InkWell(
+                onTap: () async {
+                  final picker = ImagePicker();
+                  final image = await picker.pickImage(
+                    source: ImageSource.gallery,
+                    maxWidth: 800,
+                    imageQuality: 75,
+                  );
+
+                  if (image != null) {
+                    SmartDialog.showLoading(msg: 'Đang tải mã QR lên R2...');
+                    final bytes = await image.readAsBytes();
+                    final newUrl = await UploadService().uploadImageToR2(
+                      bytes,
+                      'qr_${DateTime.now().millisecondsSinceEpoch}.png',
+                    );
+                    SmartDialog.dismiss();
+
+                    if (newUrl != null) {
+                      // ---> LOGIC DỌN RÁC Ở ĐÂY <---
+                      final oldUrl = _invitation.dynamicData['qr_code_url'];
+                      if (oldUrl != null && oldUrl.isNotEmpty) {
+                        // Gọi xóa ảnh cũ ngầm bên dưới
+                        UploadService().deleteFromR2(oldUrl);
+                      }
+
+                      // Cập nhật URL mới vào State
+                      _updateDynamicData('qr_code_url', newUrl);
+                      SmartDialog.showToast('Cập nhật mã QR thành công!');
+                    }
+                  }
+                },
+                child: Container(
+                  width: 120,
+                  height: 120,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFDFBF7),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.grey.withOpacity(0.3)),
+                    image: qrCodeUrl != null
+                        ? DecorationImage(
+                            image: NetworkImage(qrCodeUrl),
+                            fit: BoxFit.cover,
+                          )
+                        : null,
+                  ),
+                  child: qrCodeUrl == null
+                      ? const Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.add_photo_alternate_outlined,
+                              color: Colors.grey,
+                              size: 32,
+                            ),
+                            SizedBox(height: 4),
+                            Text(
+                              'Tải mã QR',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ],
+                        )
+                      : null,
+                ),
+              ),
+              const SizedBox(width: 16),
+
+              // Form thông tin Text đi kèm QR
+              Expanded(
+                child: Column(
+                  children: [
+                    TextFormField(
+                      initialValue: _invitation.dynamicData['bank_name'] ?? '',
+                      decoration: InputDecoration(
+                        labelText: 'Tên Ngân hàng / Ví',
+                        hintText: 'VD: Vietcombank / Momo',
+                        filled: true,
+                        fillColor: const Color(0xFFFDFBF7),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                      onChanged: (val) => _updateDynamicData('bank_name', val),
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      initialValue:
+                          _invitation.dynamicData['bank_account'] ?? '',
+                      decoration: InputDecoration(
+                        labelText: 'Số tài khoản & Tên chủ thẻ',
+                        hintText: 'VD: 0123456789 - NGUYEN VAN A',
+                        filled: true,
+                        fillColor: const Color(0xFFFDFBF7),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                      onChanged: (val) =>
+                          _updateDynamicData('bank_account', val),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }
